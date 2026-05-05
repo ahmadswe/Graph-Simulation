@@ -2,7 +2,7 @@ CC = gcc
 CFLAGS = -Wall -Wextra -g
 
 milestone1:
-	$(CC) $(CFLAGS) src/milestone1_main.c -o dijkstra
+	$(CC) $(CFLAGS) src/main.c src/graph.c src/dijkstra.c -o dijkstra
 
 clean:
-	rm -f dijkstra
+	rm -f dijkstra sim
