@@ -1,0 +1,10 @@
+# test: 3 travelers same src/dst — maximum visible queuing at every node
+4 3
+0 1 1
+1 2 1
+2 3 1
+# travelers
+3
+0 3
+0 3
+0 3

@@ -1,0 +1,10 @@
+# test: 3 travelers on completely separate paths — semaphores never block
+6 3
+0 1 2
+2 3 2
+4 5 2
+# travelers
+3
+0 1
+2 3
+4 5

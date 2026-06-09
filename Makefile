@@ -16,5 +16,8 @@ milestone4:
 milestone5:
 	$(CC) $(CFLAGS) src/sim_milestone5.c src/graph.c src/dijkstra.c -o sim -lraylib -lGL -lm -lpthread -ldl -lrt -lX11
 
+milestone6:
+	$(CC) $(CFLAGS) src/sim_milestone6.c src/graph.c src/dijkstra.c -o sim -lraylib -lGL -lm -lpthread -ldl -lrt -lX11
+
 clean:
 	rm -f dijkstra sim

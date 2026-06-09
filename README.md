@@ -177,6 +177,40 @@ Pipes were chosen because they are simple, well-supported, and provide a natural
 
 ---
 
+---
+
+## Milestone 6 – Node Access Synchronization
+
+### Compile
+
+```bash
+make milestone6
+```
+
+### Run
+
+```bash
+./sim inputs/graph_m6.txt
+```
+
+### Synchronization mechanism: POSIX Named Semaphores (`sem_open`)
+
+One binary semaphore is created per node before forking (`/gs_node_N`). When a child wants to enter a node it calls `sem_wait()` (which may block if another traveler is already inside), stays for exactly 1 second, then calls `sem_post()` to release the node.
+
+This guarantees mutual exclusion per node with no starvation (POSIX semaphores are fair on Linux).
+
+### IPC mechanism: Anonymous pipes (same as Milestone 5)
+
+### Description
+
+* At most one traveler may occupy a node at any moment
+* Travelers waiting outside a node are shown in **gray** with a **W** indicator
+* Travelers inside a node are shown in their assigned color
+* The parent receives `MSG_WAITING`, `MSG_ENTERED`, `MSG_MOVING`, and `MSG_FINISHED` messages from children and updates the GUI accordingly
+* Children compute their own Dijkstra paths (no path data from parent)
+
+---
+
 ## Notes
 
 * Invalid input prints: `Invalid input`

@@ -1,0 +1,11 @@
+# test: 2 travelers both arrive at node 1 simultaneously
+# T0: 0->1->3   T1: 2->1->3  — both fight for node 1
+5 4
+0 1 1
+2 1 1
+1 3 1
+1 4 1
+# travelers
+2
+0 3
+2 4
