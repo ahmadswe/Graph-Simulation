@@ -1,3 +1,9 @@
+/*
+ * Dijkstra algorithm implementations.
+ * Contains a simple console version that prints the shortest path and
+ * a reusable path-finding function for GUI and simulation modules.
+ */
+
 #include <stdio.h>
 #include "dijkstra.h"
 

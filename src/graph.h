@@ -1,6 +1,12 @@
 #ifndef GRAPH_H
 #define GRAPH_H
 
+/*
+ * Graph data structures and input loader declarations.
+ * Stores a directed weighted adjacency matrix and provides support for
+ * single-path and multi-traveler graph input formats.
+ */
+
 #define INF 1000000000
 #define MAX_NODES 15
 

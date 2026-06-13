@@ -1,3 +1,9 @@
+/*
+ * Milestone 4 multi-traveler simulation with forked child processes.
+ * The parent process maintains the GUI animation while each child process
+ * is started for a traveler and terminated when the traveler reaches its destination.
+ */
+
 #include <stdio.h>
 #include <math.h>
 #include <signal.h>

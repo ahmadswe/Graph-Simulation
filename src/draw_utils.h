@@ -1,6 +1,12 @@
 #ifndef DRAW_UTILS_H
 #define DRAW_UTILS_H
 
+/*
+ * Shared raylib drawing helpers.
+ * Provides functions to render graph edges, nodes, and circular node layouts
+ * for the GUI simulation milestones.
+ */
+
 #include <math.h>
 #include <stdio.h>
 #include "raylib.h"

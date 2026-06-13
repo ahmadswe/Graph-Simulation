@@ -1,3 +1,9 @@
+/*
+ * Graph input and parsing utilities.
+ * Provides functions to load a directed weighted graph from a file and
+ * to load an extended graph format containing multiple traveler specifications.
+ */
+
 #include <stdio.h>
 #include "graph.h"
 

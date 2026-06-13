@@ -1,3 +1,9 @@
+/*
+ * Milestone 5 simulation using anonymous pipes for child-to-parent IPC.
+ * Each child computes its own path and sends node arrival messages to the
+ * parent, which animates all travelers while printing status updates.
+ */
+
 #include <stdio.h>
 #include <math.h>
 #include <unistd.h>

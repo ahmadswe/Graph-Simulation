@@ -1,3 +1,9 @@
+/*
+ * Milestone 6 synchronization with POSIX named semaphores.
+ * Child processes acquire a semaphore for each node before occupying it,
+ * ensuring exclusive node access, while the parent animates traveler progress.
+ */
+
 #include <stdio.h>
 #include <math.h>
 #include <unistd.h>

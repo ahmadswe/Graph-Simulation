@@ -1,3 +1,9 @@
+/*
+ * Milestone 3 raylib visualization and animation.
+ * Loads a graph with a source and destination, computes the shortest path,
+ * displays the graph, and animates a traveler moving along the path.
+ */
+
 #include <stdio.h>
 #include <math.h>
 #include "raylib.h"

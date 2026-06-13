@@ -1,3 +1,10 @@
+/*
+ * Milestone 1 entry point.
+ * Loads a directed weighted graph from a file, computes the shortest path
+ * between the requested source and destination using Dijkstra's algorithm,
+ * and prints the resulting node sequence and total path weight.
+ */
+
 #include <stdio.h>
 #include "graph.h"
 #include "dijkstra.h"
