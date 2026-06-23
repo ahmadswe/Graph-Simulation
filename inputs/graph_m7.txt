@@ -1,0 +1,21 @@
+# graph for milestone 7 – scheduling algorithms demo
+# topology: 4 travelers all enter the bottleneck node 2 at nearly the same time
+# 2 travelers have a short remaining path after node 2 (weight 1, to nodes 3/4)
+# 2 travelers have a long  remaining path after node 2 (weight 5, to nodes 5/6)
+#
+# FCFS: order depends on which child sends MSG_WAITING first (arrival order)
+# SJF:  travelers bound for nodes 3 and 4 (remaining=1) always go before
+#       travelers bound for nodes 5 and 6 (remaining=5) regardless of arrival order
+7 6
+0 2 1
+1 2 1
+2 3 1
+2 4 1
+2 5 5
+2 6 5
+# travelers
+4
+0 3
+1 5
+0 4
+1 6

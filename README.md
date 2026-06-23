@@ -211,6 +211,58 @@ This guarantees mutual exclusion per node with no starvation (POSIX semaphores a
 
 ---
 
+---
+
+## Milestone 7 – Scheduling Algorithms
+
+### Compile
+
+```bash
+make milestone7
+```
+
+### Run
+
+```bash
+./sim -schd fcfs inputs/graph_m7.txt
+./sim -schd sjf  inputs/graph_m7.txt
+```
+
+### Scheduling algorithms implemented
+
+**FCFS – First Come First Served**
+When multiple travelers wait to enter the same node, they are admitted in the order their `MSG_WAITING` message reached the parent (i.e., arrival order). The parent assigns each waiter a monotonically increasing sequence number and always wakes the traveler with the smallest number next.
+
+**SJF – Shortest Job First**
+Each child computes the total remaining path weight from the current node to its destination and sends it as a priority value in the `MSG_WAITING` message. The parent always wakes the waiter with the smallest remaining weight next. Travelers with a shorter onward journey are served first, reducing their average waiting time.
+
+### How it works
+
+* Children no longer call `sem_wait` directly. Instead each child sends `MSG_WAITING` and blocks on a per-child signal pipe until the parent grants entry.
+* The parent maintains a waiting queue per node. On receiving `MSG_WAITING` it inserts the traveler with its priority and calls `schedule_next`, which wakes the best candidate immediately if the node is free.
+* When a traveler finishes occupying a node it sends `MSG_LEAVING`; the parent marks the node free and calls `schedule_next` again to admit the next waiter.
+* Two pipes per traveler: one **child→parent** data pipe (messages) and one **parent→child** signal pipe (1-byte grant).
+
+### GUI differences
+
+* A coloured banner in the top-left corner shows the active algorithm (**blue** for FCFS, **green** for SJF).
+* Each node with queued waiters shows a **Q:N** counter.
+* Waiting travelers are drawn in **gray** with a **W** label.
+* When a traveler finishes, the terminal prints total accumulated wait time and the number of node-waits.
+
+### Algorithm comparison (same input `graph_m7.txt`)
+
+The test graph routes 4 travelers through a single bottleneck (node 2). Two have a short onward path (weight 1) and two have a long onward path (weight 5).
+
+| Algorithm | Ordering at node 2 | Effect |
+|---|---|---|
+| FCFS | Arrival order (non-deterministic) | Short and long jobs interleaved; long jobs may block short ones |
+| SJF | Shortest remaining path first (1 before 5) | Short-path travelers always admitted first; their total wait is minimized |
+
+With SJF the two travelers heading to nodes 3 and 4 (remaining weight = 1) are always served before the two heading to nodes 5 and 6 (remaining weight = 5), leading to lower average wait time for those travelers.
+
+---
+
 ## Notes
 
 * Invalid input prints: `Invalid input`
