@@ -1,3 +1,34 @@
+/*
+ * ===================================================================
+ * MILESTONE 7 - תזמון (Scheduling: FCFS ו-SJF)
+ * ===================================================================
+ * מה קורה כאן:
+ *   - שני כיווני תקשורת לכל נוסע:
+ *       data_pipe:   בן -> אב (הודעות מצב)
+ *       signal_pipe: אב -> בן (אישור כניסה לצומת)
+ *   - הבן שולח MSG_WAITING וחוסם על read() מ-signal_pipe
+ *   - האב הוא המתזמן: מנהל תור המתנה לכל צומת
+ *   - כשצומת מתפנה (MSG_LEAVING) -> האב בוחר מי נכנס הבא
+ *
+ * *** אלגוריתמי תזמון ***:
+ *   FCFS: priority = מספר סדרתי לפי סדר הגעה (g_arrival_seq++)
+ *   SJF:  priority = משקל נתיב שנותר (msg.priority = remaining[i])
+ *   -> priority נמוך יותר = שרות קודם
+ *
+ * הרצה: ./sim -schd fcfs <file>  OR  ./sim -schd sjf <file>
+ *
+ * נקודות שינוי שכיחות בבחינה:
+ *   1. הוספת אלגוריתם תזמון חדש (למשל Round-Robin):
+ *      -> הוסף enum SCHED_RR, הוסף לוגיקה ב-schedule_next()  שורה ~89
+ *   2. שינוי פרמטר SJF (למשל לפי משקל כולל ולא נותר):
+ *      -> שנה remaining[] בחישוב ב-child_run  שורה ~121
+ *   3. שינוי זמן שהייה בצומת:
+ *      -> שנה NODE_STAY_TIME  שורה ~15
+ *   4. הוספת הדפסת סטטיסטיקות:
+ *      -> ב-MSG_FINISHED יש כבר total_wait_ns - שורה ~319
+ * ===================================================================
+ */
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -16,12 +47,12 @@
 
 typedef enum { SCHED_FCFS, SCHED_SJF } SchedAlgo;
 
-/* Message types child -> parent */
-#define MSG_WAITING  0   /* want to enter node (blocked until parent signals)  */
-#define MSG_ENTERED  1   /* parent granted entry, now inside node               */
-#define MSG_MOVING   2   /* released node, traversing edge                      */
-#define MSG_FINISHED 3   /* journey complete                                    */
-#define MSG_LEAVING  4   /* about to leave node (parent may schedule next)      */
+/* סוגי הודעות בן -> אב */
+#define MSG_WAITING  0   /* מבקש להיכנס לצומת - האב יאשר דרך signal_pipe  */
+#define MSG_ENTERED  1   /* קיבל אישור, נכנס לצומת                         */
+#define MSG_MOVING   2   /* יוצא מהצומת, נע בקשת                           */
+#define MSG_FINISHED 3   /* סיים מסלול                                      */
+#define MSG_LEAVING  4   /* עוזב צומת - האב יכול לתזמן את הבא              */
 
 typedef struct {
     int type;
@@ -85,22 +116,31 @@ static long long now_ns(void) {
     return (long long)ts.tv_sec * 1000000000LL + ts.tv_nsec;
 }
 
-/* Wake the best-priority waiting traveler for this node */
+/* *** לב המתזמן - בחירת הנוסע הבא שייכנס לצומת ***
+ * מוצא את הנוסע עם ה-priority הנמוך ביותר בתור
+ * FCFS: priority = מספר הגעה (ראשון שהגיע = priority נמוך)
+ * SJF:  priority = משקל נתיב שנותר (קצר יותר = priority נמוך)
+ * שולח 'go=1' דרך signal_pipe -> מאפשר לבן לצאת מ-read() ולהיכנס
+ * לשינוי אלגוריתם: שנה את לוגיקת בחירת "best" כאן
+ */
 static void schedule_next(int node) {
     NodeQueue *nq = &g_node_queues[node];
     if (nq->count == 0 || nq->busy) return;
 
+    /* *** בחירת הנוסע עם ה-priority הנמוך ביותר *** */
     int best = 0;
     for (int i = 1; i < nq->count; i++)
         if (nq->entries[i].priority < nq->entries[best].priority)
             best = i;
 
     int tidx = nq->entries[best].traveler_idx;
+    /* הסרה מהתור */
     for (int i = best; i < nq->count - 1; i++)
         nq->entries[i] = nq->entries[i + 1];
     nq->count--;
     nq->busy = 1;
 
+    /* *** שליחת אישור לבן דרך signal_pipe *** */
     char go = 1;
     write(g_signal_wfds[tidx], &go, 1);
 }
@@ -118,7 +158,11 @@ static void child_run(int write_fd, int read_fd, const Graph *g, int src, int ds
         _exit(0);
     }
 
-    /* Precompute remaining path weight from each position (used as SJF priority) */
+    /* *** חישוב מקדים של משקל נתיב שנותר לכל צומת (לצורך SJF) ***
+     * remaining[i] = סכום משקלי הקשתות מ-i עד הסוף
+     * לשינוי קריטריון SJF (למשל לפי מספר צמתים ולא משקל):
+     * שנה את החישוב הזה
+     */
     int remaining[MAX_NODES];
     remaining[len - 1] = 0;
     for (int i = len - 2; i >= 0; i--)
@@ -128,21 +172,28 @@ static void child_run(int write_fd, int read_fd, const Graph *g, int src, int ds
         int node = path[i];
         int next = (i < len - 1) ? path[i + 1] : -1;
 
-        /* Notify parent: waiting to enter node */
+        /* *** שליחת MSG_WAITING + priority לאב ***
+         * priority = remaining[i] לSJF, g_arrival_seq לFCFS (האב בוחר)
+         */
         TravelerMsg m = {MSG_WAITING, node, next, remaining[i]};
         write(write_fd, &m, sizeof(m));
 
-        /* Block until parent grants entry (scheduler decides order) */
+        /* *** חסימה עד שהאב (המתזמן) ישלח אישור דרך signal_pipe ***
+         * האב קורא MSG_WAITING ומוסיף לתור, כשהתור מגיע לנוסע הזה
+         * האב שולח 'go' ואז read() חוזרת
+         */
         char go;
         read(read_fd, &go, 1);
 
-        /* Notify parent: now inside node */
+        /* *** נכנסנו לצומת - שליחת MSG_ENTERED לאב *** */
         m.type = MSG_ENTERED;
         write(write_fd, &m, sizeof(m));
 
-        sleep(NODE_STAY_TIME);
+        sleep(NODE_STAY_TIME); /* שהייה בצומת */
 
-        /* Notify parent: leaving node so next waiter can be scheduled */
+        /* *** שליחת MSG_LEAVING - מאפשר לאב לתזמן את הנוסע הבא ***
+         * חיוני! בלי זה האב לא ידע שהצומת התפנה
+         */
         m.type = MSG_LEAVING;
         write(write_fd, &m, sizeof(m));
 
@@ -245,7 +296,13 @@ int main(int argc, char *argv[]) {
     while (!WindowShouldClose()) {
         float dt = GetFrameTime();
 
-        /* 1. Drain pipes – scheduling messages are handled immediately */
+        /* *** 1. קריאת הודעות מהבנים - עיבוד תזמון מיידי ***
+         * MSG_WAITING: הוספה לתור הצומת + ניסיון תזמון
+         *   FCFS: prio = g_arrival_seq++ (מספר סדרתי)
+         *   SJF:  prio = msg.priority (משקל נתיב שנותר שחישב הבן)
+         * MSG_LEAVING: הצומת התפנה -> תזמן נוסע הבא
+         * שאר ההודעות (ENTERED/MOVING/FINISHED): לתור GUI
+         */
         for (int i = 0; i < nt; i++) {
             Traveler7 *t = &travelers[i];
             if (t->state == T_FINISHED) continue;
@@ -254,15 +311,17 @@ int main(int argc, char *argv[]) {
                 if (msg.type == MSG_WAITING) {
                     t->state         = T_WAITING;
                     t->wait_start_ns = now_ns();
+                    /* *** בחירת priority לפי האלגוריתם *** */
                     int prio = (g_sched == SCHED_SJF) ? msg.priority : g_arrival_seq++;
                     NodeQueue *nq    = &g_node_queues[msg.node];
                     nq->entries[nq->count++] = (WaitEntry){i, prio};
-                    schedule_next(msg.node);
+                    schedule_next(msg.node); /* אולי הצומת פנוי - תזמן מיד */
                 } else if (msg.type == MSG_LEAVING) {
+                    /* *** הצומת התפנה - תזמן נוסע הבא מהתור *** */
                     g_node_queues[msg.node].busy = 0;
                     schedule_next(msg.node);
                 } else {
-                    q_push(&t->queue, msg);
+                    q_push(&t->queue, msg); /* הכנסה לתור GUI */
                 }
             }
         }

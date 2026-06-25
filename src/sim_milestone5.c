@@ -1,3 +1,24 @@
+/*
+ * ===================================================================
+ * MILESTONE 5 - צינורות (Pipes)
+ * ===================================================================
+ * מה קורה כאן:
+ *   - כל נוסע מקבל תהליך בן + pipe תקשורת (כיוון: בן -> אב)
+ *   - הבן מחשב את מסלול דייקסטרה ושולח הודעות לאב דרך ה-pipe
+ *   - האב קורא הודעות (non-blocking) ומעדכן אנימציה
+ *
+ * מבנה ה-pipe:
+ *   pipefds[i][0] = קצה קריאה (אצל האב)
+ *   pipefds[i][1] = קצה כתיבה (אצל הבן)
+ *
+ * נקודות שינוי שכיחות בבחינה:
+ *   1. הוספת שדה ל-TravelerMsg -> עדכן גם את השליחה ב-run_child
+ *   2. שינוי ה-sleep בבן -> usleep((long)w * ...)  שורה ~71
+ *   3. הוספת הדפסה ב-apply_message -> שורה ~84
+ *   4. שינוי מה קורה כשמגיעים ליעד -> שורה ~93
+ * ===================================================================
+ */
+
 #include <stdio.h>
 #include <math.h>
 #include <unistd.h>
@@ -10,7 +31,9 @@
 
 #define MOVE_STEP_TIME 0.3f
 
-/* Message sent from child to parent over a pipe */
+/* *** הודעה שהבן שולח לאב דרך ה-pipe ***
+ * לשינוי פרוטוקול: הוסף שדות כאן ועדכן את run_child ו-apply_message
+ */
 typedef struct {
     int current_node;
     int next_node;  /* -1 = reached destination */
@@ -47,8 +70,12 @@ static Color palette[]   = {GREEN, ORANGE, PURPLE, YELLOW, PINK, RED, BLUE, BROW
 static int   palette_size = 8;
 
 /* ------------------------------------------------------------------ */
-/* Child entry point                                                    */
-/* ------------------------------------------------------------------ */
+/* *** קוד תהליך הבן ***
+ * הבן מחשב מסלול, ואז לכל צומת:
+ *   1. שולח הודעה עם הצומת הנוכחי והבא
+ *   2. מחכה (usleep) לפי משקל הקשת
+ * בסוף שולח הודעת finished ויוצא
+ * ------------------------------------------------------------------ */
 static void run_child(int write_fd, const Graph *graph, int src, int dst) {
     int path[MAX_NODES], path_length, total_weight;
 
@@ -64,14 +91,17 @@ static void run_child(int write_fd, const Graph *graph, int src, int dst) {
         msg.finished     = 0;
         msg.current_node = path[i];
         msg.next_node    = (i < path_length - 1) ? path[i + 1] : -1;
+        /* *** שליחת הודעה לאב דרך ה-pipe *** */
         write(write_fd, &msg, sizeof(msg));
 
         if (i < path_length - 1) {
             int w = graph->matrix[path[i]][path[i + 1]];
+            /* *** המתנה לפי משקל הקשת - לשינוי זמן ההמתנה שנה כאן *** */
             usleep((long)w * (long)(MOVE_STEP_TIME * 1000000));
         }
     }
 
+    /* *** הודעת סיום - finished=1 *** */
     TravelerMsg done = {-1, -1, 1};
     write(write_fd, &done, sizeof(done));
     close(write_fd);
@@ -79,8 +109,9 @@ static void run_child(int write_fd, const Graph *graph, int src, int dst) {
 }
 
 /* ------------------------------------------------------------------ */
-/* Apply a received message to a traveler                               */
-/* ------------------------------------------------------------------ */
+/* *** עיבוד הודעה שהתקבלה מהבן - עדכון מצב הנוסע ***
+ * שינויים שכיחים: הוסף הדפסות, שנה התנהגות בהגעה ליעד
+ * ------------------------------------------------------------------ */
 static void apply_message(Traveler *t, const TravelerMsg *msg,
                            const Graph *graph, Vector2 positions[]) {
     if (msg->finished) {
@@ -128,7 +159,10 @@ int main(int argc, char *argv[]) {
     if (!load_graph_with_travelers(argv[1], &graph, specs, &num_travelers))
         return 1;
 
-    /* Create one pipe per traveler before forking */
+    /* *** יצירת pipe לכל נוסע לפני ה-fork ***
+     * pipefds[i][0] = read end  (האב קורא מכאן)
+     * pipefds[i][1] = write end (הבן כותב לכאן)
+     */
     int pipefds[MAX_TRAVELERS][2];
     for (int i = 0; i < num_travelers; i++) {
         if (pipe(pipefds[i]) < 0) {
@@ -171,7 +205,9 @@ int main(int argc, char *argv[]) {
         /* Parent closes the write end for this child's pipe */
         close(pipefds[i][1]);
 
-        /* Make reads non-blocking so the game loop never stalls */
+        /* *** non-blocking read - האב לא נחסם אם אין הודעה ***
+         * בלי זה, read() היה חוסם את לולאת הציור
+         */
         fcntl(t->read_fd, F_SETFL, O_NONBLOCK);
     }
 

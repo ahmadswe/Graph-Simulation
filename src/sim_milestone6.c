@@ -1,3 +1,27 @@
+/*
+ * ===================================================================
+ * MILESTONE 6 - סמפורים (POSIX Named Semaphores)
+ * ===================================================================
+ * מה קורה כאן:
+ *   - כל צומת בגרף מוגן על ידי semaphore עם ערך 1 (mutex)
+ *   - רק נוסע אחד יכול להיות בצומת בו-זמנית
+ *   - הבן: sem_wait() לפני כניסה, sem_post() לאחר יציאה
+ *   - תקשורת בן->אב: pipe (כמו milestone5) + הודעות MSG_WAITING/ENTERED/MOVING
+ *
+ * *** שמות הסמפורים: "/gs_node_0", "/gs_node_1", ... ***
+ *
+ * נקודות שינוי שכיחות בבחינה:
+ *   1. שינוי קיבולת הצומת (כמה נוסעים בו-זמנית):
+ *      -> שנה 1 ל-N ב: sem_open(..., 1)  שורה ~165
+ *   2. שינוי זמן השהייה בצומת:
+ *      -> שנה NODE_STAY_TIME (הגדרה למעלה) או sleep() בשורה ~89
+ *   3. הוספת timeout לסמפור (sem_timedwait במקום sem_wait):
+ *      -> החלף sem_wait(sems[node]) ב-sem_timedwait()  שורה ~83
+ *   4. שינוי מה קורה ב-MSG_WAITING (לפני ה-sem_wait):
+ *      -> עדכן apply_msg, case MSG_WAITING  שורה ~114
+ * ===================================================================
+ */
+
 #include <stdio.h>
 #include <math.h>
 #include <unistd.h>
@@ -10,13 +34,13 @@
 #include "draw_utils.h"
 
 #define MOVE_STEP_TIME 0.3f
-#define NODE_STAY_TIME 1       /* seconds a traveler stays in a node */
+#define NODE_STAY_TIME 1       /* שניות שהנוסע נשאר בצומת - לשינוי שנה כאן */
 
-/* Message types sent from child to parent */
-#define MSG_WAITING  0   /* about to try entering a node (before sem_wait) */
-#define MSG_ENTERED  1   /* acquired semaphore, now inside the node        */
-#define MSG_MOVING   2   /* released semaphore, traversing edge             */
-#define MSG_FINISHED 3   /* journey complete                                */
+/* סוגי הודעות מהבן לאב */
+#define MSG_WAITING  0   /* לפני sem_wait - מחכה להיכנס לצומת */
+#define MSG_ENTERED  1   /* אחרי sem_wait - נכנס לצומת         */
+#define MSG_MOVING   2   /* אחרי sem_post - יוצא וזז לקשת      */
+#define MSG_FINISHED 3   /* סיים את כל המסלול                   */
 
 typedef struct {
     int type;
@@ -59,8 +83,15 @@ static Color palette[]   = {GREEN, ORANGE, PURPLE, YELLOW, PINK, RED, BLUE, BROW
 static int   palette_size = 8;
 
 /* ------------------------------------------------------------------ */
-/* Child: compute own path, traverse with semaphore-guarded node visits */
-/* ------------------------------------------------------------------ */
+/* *** קוד תהליך הבן עם סמפורים ***
+ * לכל צומת במסלול:
+ *   1. שולח MSG_WAITING (מחכה בתור)
+ *   2. sem_wait() - חוסם עד שהצומת פנוי
+ *   3. שולח MSG_ENTERED (נכנס לצומת)
+ *   4. sleep(NODE_STAY_TIME) - שוהה בצומת
+ *   5. sem_post() - משחרר את הצומת לנוסע הבא
+ *   6. שולח MSG_MOVING + usleep() לאורך הקשת
+ * ------------------------------------------------------------------ */
 static void child_run(int fd, const Graph *g, int src, int dst, sem_t *sems[]) {
     int path[MAX_NODES], len, w;
 
@@ -75,22 +106,24 @@ static void child_run(int fd, const Graph *g, int src, int dst, sem_t *sems[]) {
         int node = path[i];
         int next = (i < len - 1) ? path[i + 1] : -1;
 
-        /* Notify parent: waiting outside node */
+        /* *** שליחת MSG_WAITING - לפני כניסה לצומת *** */
         TravelerMsg m = {MSG_WAITING, node, next};
         write(fd, &m, sizeof(m));
 
-        /* Enter critical section (may block until node is free) */
+        /* *** sem_wait - חסימה עד שהצומת פנוי (critical section) ***
+         * לשינוי לטיימאאוט: החלף ב-sem_timedwait(&sems[node], &ts)
+         * לאפשר N נוסעים: שנה ערך סמפור ל-N בsem_open()
+         */
         sem_wait(sems[node]);
 
-        /* Notify parent: inside node */
+        /* *** שליחת MSG_ENTERED - אחרי קבלת הסמפור *** */
         m.type = MSG_ENTERED;
         write(fd, &m, sizeof(m));
 
-        sleep(NODE_STAY_TIME); /* occupy node for 1 second */
+        sleep(NODE_STAY_TIME); /* *** שהייה בצומת - לשינוי: שנה NODE_STAY_TIME *** */
 
-        sem_post(sems[node]); /* release node */
+        sem_post(sems[node]); /* *** שחרור הסמפור - מאפשר לנוסע הבא להיכנס *** */
 
-        /* Traverse edge to next node */
         if (next != -1) {
             int ew = g->matrix[node][next];
             m = (TravelerMsg){MSG_MOVING, node, next};
@@ -156,13 +189,18 @@ int main(int argc, char *argv[]) {
     if (!load_graph_with_travelers(argv[1], &graph, specs, &nt))
         return 1;
 
-    /* Create one semaphore per node (initial value = 1, i.e. one slot) */
+    /* *** יצירת semaphore אחד לכל צומת ***
+     * sem_open(name, O_CREAT|O_EXCL, 0644, 1):
+     *   - הערך ההתחלתי 1 = רק נוסע אחד בו-זמנית
+     *   - לאפשר N נוסעים: החלף 1 ב-N
+     * sem_unlink() לפני - למחוק שאריות מהרצה קודמת
+     */
     sem_t *sems[MAX_NODES];
     for (int i = 0; i < graph.nodes; i++) {
         char name[32];
         snprintf(name, sizeof(name), "/gs_node_%d", i);
-        sem_unlink(name); /* remove any stale semaphore */
-        sems[i] = sem_open(name, O_CREAT | O_EXCL, 0644, 1);
+        sem_unlink(name); /* מחיקת semaphore ישן */
+        sems[i] = sem_open(name, O_CREAT | O_EXCL, 0644, 1); /* *** 1 = קיבולת צומת *** */
         if (sems[i] == SEM_FAILED) { perror("sem_open"); return 1; }
     }
 
@@ -279,7 +317,10 @@ int main(int argc, char *argv[]) {
 
     CloseWindow();
 
-    /* Cleanup semaphores */
+    /* *** ניקוי סמפורים בסוף - חיוני! אחרת נשארים ב-/dev/shm ***
+     * sem_close() = סגירה מקומית
+     * sem_unlink() = מחיקה מהמערכת
+     */
     for (int i = 0; i < graph.nodes; i++) {
         char name[32];
         snprintf(name, sizeof(name), "/gs_node_%d", i);

@@ -1,3 +1,23 @@
+/*
+ * ===================================================================
+ * MILESTONE 4 - תהליכים וסיגנלים
+ * ===================================================================
+ * מה קורה כאן:
+ *   - כל נוסע (traveler) מקבל תהליך בן (child process) משלו
+ *   - תהליך הבן מחכה עם pause() עד שמגיע סיגנל מהאב
+ *   - כשהנוסע מסיים את המסלול -> האב שולח SIGTERM לבן
+ *   - האב קורא waitpid() בסוף כדי לאסוף את הבנים
+ *
+ * נקודות שינוי שכיחות בבחינה:
+ *   1. שינוי הסיגנל שנשלח (SIGTERM -> SIGUSR1 וכו')
+ *      -> חפש: kill(t->pid, SIGTERM)  שורה ~149 ו-~193
+ *   2. הוספת signal handler לתהליך הבן (הוסף לפני pause())
+ *      -> חפש: pid_t pid = fork()     שורה ~76
+ *   3. הדפסת זמן שינה בתהליך הבן
+ *      -> הוסף time(NULL) לפני ואחרי pause()
+ * ===================================================================
+ */
+
 #include <stdio.h>
 #include <math.h>
 #include <signal.h>
@@ -11,19 +31,21 @@
 #define MOVE_STEP_TIME 0.3f
 #define WAIT_TIME      1.0f
 
+/* מצבי האנימציה של הנוסע */
 typedef enum {
-    STATE_WAITING,
-    STATE_MOVING,
-    STATE_FINISHED
+    STATE_WAITING,   /* מחכה בצומת לפני תנועה */
+    STATE_MOVING,    /* נע לאורך הקשת */
+    STATE_FINISHED   /* הגיע ליעד */
 } AnimState;
 
+/* מבנה נוסע - מחזיק נתוני אנימציה + PID של תהליך הבן */
 typedef struct {
-    int      src, dst;
-    int      path[MAX_NODES];
+    int      src, dst;        /* צומת מקור ויעד */
+    int      path[MAX_NODES]; /* מסלול דייקסטרה */
     int      path_length;
     int      total_weight;
-    pid_t    pid;
-    int      child_active;
+    pid_t    pid;             /* *** PID של תהליך הבן *** */
+    int      child_active;    /* 1 = הבן עדיין חי */
     Color    color;
     int      path_index;
     int      edge_step;
@@ -68,16 +90,24 @@ int main(int argc, char *argv[]) {
         }
     }
 
-    /* Fork children BEFORE opening the window */
+    /* *** FORK - יצירת תהליכי בנים לפני פתיחת החלון ***
+     * כל בן: מדפיס "started", מחכה עם pause() לסיגנל, אז יוצא.
+     * להוספת signal handler -> הוסף signal(SIGUSR1, handler) לפני pause()
+     * לדוגמה:
+     *   void handler(int sig) { printf("got signal %d\n", sig); }
+     *   ...
+     *   if (pid == 0) { signal(SIGUSR1, handler); pause(); _exit(0); }
+     */
     for (int i = 0; i < num_travelers; i++) {
         if (travelers[i].state == STATE_FINISHED)
             continue;
 
         pid_t pid = fork();
         if (pid == 0) {
+            /* *** קוד תהליך הבן מתחיל כאן *** */
             printf("[%d] started\n", getpid());
             fflush(stdout);
-            pause();
+            pause(); /* *** חסימה עד לסיגנל מהאב *** */
             _exit(0);
         }
         if (pid < 0) {
@@ -146,6 +176,10 @@ int main(int argc, char *argv[]) {
                             if (t->path_index == t->path_length - 1) {
                                 t->state = STATE_FINISHED;
                                 if (t->child_active) {
+                                    /* *** שליחת סיגנל לתהליך הבן כשהנוסע הגיע ליעד ***
+                                     * לשינוי סיגנל: החלף SIGTERM ב-SIGUSR1 / SIGUSR2 וכו'
+                                     * kill(pid, signal) -> שולח signal לתהליך pid
+                                     */
                                     kill(t->pid, SIGTERM);
                                     t->child_active = 0;
                                 }
@@ -187,7 +221,10 @@ int main(int argc, char *argv[]) {
 
     CloseWindow();
 
-    /* Kill any still-running children and reap all */
+    /* *** ניקוי בסוף - הריגת בנים שעדיין חיים + waitpid ***
+     * waitpid() חיוני למניעת zombie processes
+     * אם שינית את הסיגנל למעלה, שנה גם כאן
+     */
     for (int i = 0; i < num_travelers; i++) {
         if (travelers[i].child_active)
             kill(travelers[i].pid, SIGTERM);
