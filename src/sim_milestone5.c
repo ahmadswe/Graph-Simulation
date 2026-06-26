@@ -3,19 +3,21 @@
  * MILESTONE 5 - צינורות (Pipes)
  * ===================================================================
  * מה קורה כאן:
- *   - כל נוסע מקבל תהליך בן + pipe תקשורת (כיוון: בן -> אב)
- *   - הבן מחשב את מסלול דייקסטרה ושולח הודעות לאב דרך ה-pipe
- *   - האב קורא הודעות (non-blocking) ומעדכן אנימציה
+ *   - כל נוסע מקבל תהליך בן + שני pipes (בן->אב ואב->בן לאישור)
+ *   - הבן שולח הודעה לאב ומחכה ל-ACK לפני שממשיך לצומת הבא
+ *   - האב קורא הודעות (non-blocking), מריץ אנימציה, שולח ACK בסיום
  *
- * מבנה ה-pipe:
- *   pipefds[i][0] = קצה קריאה (אצל האב)
- *   pipefds[i][1] = קצה כתיבה (אצל הבן)
+ * מבנה ה-pipes:
+ *   pipefds[i][0]     = קצה קריאה (אצל האב)       - בן->אב
+ *   pipefds[i][1]     = קצה כתיבה (אצל הבן)       - בן->אב
+ *   ack_fds[i][0]     = קצה קריאה (אצל הבן)       - אב->בן
+ *   ack_fds[i][1]     = קצה כתיבה (אצל האב)       - אב->בן
  *
  * נקודות שינוי שכיחות בבחינה:
  *   1. הוספת שדה ל-TravelerMsg -> עדכן גם את השליחה ב-run_child
- *   2. שינוי ה-sleep בבן -> usleep((long)w * ...)  שורה ~71
- *   3. הוספת הדפסה ב-apply_message -> שורה ~84
- *   4. שינוי מה קורה כשמגיעים ליעד -> שורה ~93
+ *   2. שינוי תוכן ה-ACK -> שורה ~87
+ *   3. הוספת הדפסה ב-apply_message -> שורה ~100
+ *   4. שינוי מה קורה כשמגיעים ליעד -> שורה ~109
  * ===================================================================
  */
 
@@ -52,6 +54,7 @@ typedef struct {
     pid_t        pid;
     Color        color;
     int          read_fd;
+    int          ack_write_fd;  /* האב כותב ACK לכאן */
 
     TravelerState state;
     int           current_node;
@@ -73,16 +76,19 @@ static int   palette_size = 8;
 /* *** קוד תהליך הבן ***
  * הבן מחשב מסלול, ואז לכל צומת:
  *   1. שולח הודעה עם הצומת הנוכחי והבא
- *   2. מחכה (usleep) לפי משקל הקשת
+ *   2. מחכה ל-ACK מהאב (read חוסם) לפני שממשיך לצומת הבא
  * בסוף שולח הודעת finished ויוצא
  * ------------------------------------------------------------------ */
-static void run_child(int write_fd, const Graph *graph, int src, int dst) {
+static void run_child(int write_fd, int ack_fd,
+                      const Graph *graph, int src, int dst) {
     int path[MAX_NODES], path_length, total_weight;
+    char ack;
 
     if (!dijkstra_path(graph, src, dst, path, &path_length, &total_weight)) {
         TravelerMsg done = {-1, -1, 1};
         write(write_fd, &done, sizeof(done));
         close(write_fd);
+        close(ack_fd);
         _exit(0);
     }
 
@@ -91,20 +97,21 @@ static void run_child(int write_fd, const Graph *graph, int src, int dst) {
         msg.finished     = 0;
         msg.current_node = path[i];
         msg.next_node    = (i < path_length - 1) ? path[i + 1] : -1;
+
         /* *** שליחת הודעה לאב דרך ה-pipe *** */
         write(write_fd, &msg, sizeof(msg));
 
-        if (i < path_length - 1) {
-            int w = graph->matrix[path[i]][path[i + 1]];
-            /* *** המתנה לפי משקל הקשת - לשינוי זמן ההמתנה שנה כאן *** */
-            usleep((long)w * (long)(MOVE_STEP_TIME * 1000000));
-        }
+        /* *** המתנה ל-ACK מהאב לפני שממשיכים לצומת הבא ***
+         * הבן חוסם כאן עד שהאב מסיים את האנימציה ושולח אישור
+         */
+        read(ack_fd, &ack, 1);
     }
 
     /* *** הודעת סיום - finished=1 *** */
     TravelerMsg done = {-1, -1, 1};
     write(write_fd, &done, sizeof(done));
     close(write_fd);
+    close(ack_fd);
     _exit(0);
 }
 
@@ -126,7 +133,11 @@ static void apply_message(Traveler *t, const TravelerMsg *msg,
                (int)t->pid, msg->current_node);
         fflush(stdout);
         t->position = positions[msg->current_node];
-        t->state    = T_AT_DEST;   /* keep pipe open to receive "finished" */
+        t->state    = T_AT_DEST;
+
+        /* *** שולח ACK לבן - הגיע ליעד, יכול לשלוח finished *** */
+        char ack = 1;
+        write(t->ack_write_fd, &ack, 1);
         return;
     }
 
@@ -141,6 +152,7 @@ static void apply_message(Traveler *t, const TravelerMsg *msg,
     t->timer        = 0.0f;
     t->position     = positions[msg->current_node];
     t->state        = T_MOVING;
+    /* ACK יישלח כשהאנימציה תסתיים בלולאת ה-advance */
 }
 
 /* ------------------------------------------------------------------ */
@@ -159,16 +171,15 @@ int main(int argc, char *argv[]) {
     if (!load_graph_with_travelers(argv[1], &graph, specs, &num_travelers))
         return 1;
 
-    /* *** יצירת pipe לכל נוסע לפני ה-fork ***
-     * pipefds[i][0] = read end  (האב קורא מכאן)
-     * pipefds[i][1] = write end (הבן כותב לכאן)
+    /* *** יצירת שני pipes לכל נוסע לפני ה-fork ***
+     * pipefds[i] : בן -> אב  (הודעות מיקום)
+     * ack_fds[i] : אב -> בן  (אישורים)
      */
     int pipefds[MAX_TRAVELERS][2];
+    int ack_fds[MAX_TRAVELERS][2];
     for (int i = 0; i < num_travelers; i++) {
-        if (pipe(pipefds[i]) < 0) {
-            perror("pipe");
-            return 1;
-        }
+        if (pipe(pipefds[i]) < 0) { perror("pipe"); return 1; }
+        if (pipe(ack_fds[i])  < 0) { perror("pipe"); return 1; }
     }
 
     Traveler travelers[MAX_TRAVELERS];
@@ -187,27 +198,32 @@ int main(int argc, char *argv[]) {
 
         pid_t pid = fork();
         if (pid == 0) {
-            /* Child: close all read ends and all other write ends */
+            /* Child: סגור את כל הקצוות שלא שייכים לו */
             for (int j = 0; j < num_travelers; j++) {
-                close(pipefds[j][0]);
-                if (j != i) close(pipefds[j][1]);
+                close(pipefds[j][0]);   /* קצה קריאה - רק לאב */
+                close(ack_fds[j][1]);   /* קצה כתיבה של ACK - רק לאב */
+                if (j != i) {
+                    close(pipefds[j][1]);
+                    close(ack_fds[j][0]);
+                }
             }
-            run_child(pipefds[i][1], &graph, specs[i].src, specs[i].dst);
+            run_child(pipefds[i][1], ack_fds[i][0],
+                      &graph, specs[i].src, specs[i].dst);
             /* unreachable */
         }
         if (pid < 0) {
             perror("fork");
             return 1;
         }
-        t->pid     = pid;
-        t->read_fd = pipefds[i][0];
+        t->pid          = pid;
+        t->read_fd      = pipefds[i][0];
+        t->ack_write_fd = ack_fds[i][1];
 
-        /* Parent closes the write end for this child's pipe */
+        /* האב סוגר קצוות שלא שייכים לו */
         close(pipefds[i][1]);
+        close(ack_fds[i][0]);
 
-        /* *** non-blocking read - האב לא נחסם אם אין הודעה ***
-         * בלי זה, read() היה חוסם את לולאת הציור
-         */
+        /* *** non-blocking read - האב לא נחסם אם אין הודעה *** */
         fcntl(t->read_fd, F_SETFL, O_NONBLOCK);
     }
 
@@ -217,7 +233,6 @@ int main(int argc, char *argv[]) {
     Vector2 positions[MAX_NODES];
     init_node_positions(&graph, positions);
 
-    /* Initialise visual positions to each traveler's source node */
     for (int i = 0; i < num_travelers; i++)
         travelers[i].position = positions[travelers[i].src];
 
@@ -228,7 +243,6 @@ int main(int argc, char *argv[]) {
         for (int i = 0; i < num_travelers; i++) {
             Traveler *t = &travelers[i];
             if (t->state == T_FINISHED) continue;
-            /* T_AT_DEST: still read pipe to catch the "finished" message */
 
             TravelerMsg msg;
             ssize_t n = read(t->read_fd, &msg, sizeof(msg));
@@ -263,6 +277,10 @@ int main(int argc, char *argv[]) {
                     t->position = positions[t->target_node];
                     t->state    = T_AT_NODE;
 
+                    /* *** שולח ACK לבן - האנימציה הסתיימה, יכול לעבור לצומת הבא *** */
+                    char ack = 1;
+                    write(t->ack_write_fd, &ack, 1);
+
                     if (t->has_pending) {
                         apply_message(t, &t->pending, &graph, positions);
                         t->has_pending = 0;
@@ -294,6 +312,7 @@ int main(int argc, char *argv[]) {
     /* Reap all children */
     for (int i = 0; i < num_travelers; i++) {
         close(travelers[i].read_fd);
+        close(travelers[i].ack_write_fd);
         waitpid(travelers[i].pid, NULL, 0);
     }
 
