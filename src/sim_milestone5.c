@@ -38,6 +38,7 @@ typedef struct {
     int current_node;
     int next_node;  /* -1 = reached destination */
     int finished;   /* 1 = child is exiting */
+    int no_path;    /* 1 = no path exists to destination (graph not connected) */
 } TravelerMsg;
 
 typedef enum {
@@ -80,8 +81,9 @@ static void run_child(int write_fd, const Graph *graph, int src, int dst) {
     int path[MAX_NODES], path_length, total_weight;
 
     if (!dijkstra_path(graph, src, dst, path, &path_length, &total_weight)) {
-        TravelerMsg done = {-1, -1, 1};
-        write(write_fd, &done, sizeof(done));
+        /* *** הודעה מיוחדת: אין מסלול ליעד (גרף לא קשיר) *** */
+        TravelerMsg no_path_msg = {-1, -1, 0, 1};  /* no_path=1, finished=0 */
+        write(write_fd, &no_path_msg, sizeof(no_path_msg));
         close(write_fd);
         _exit(0);
     }
@@ -91,6 +93,7 @@ static void run_child(int write_fd, const Graph *graph, int src, int dst) {
         msg.finished     = 0;
         msg.current_node = path[i];
         msg.next_node    = (i < path_length - 1) ? path[i + 1] : -1;
+        msg.no_path      = 0;
         /* *** שליחת הודעה לאב דרך ה-pipe *** */
         write(write_fd, &msg, sizeof(msg));
 
@@ -102,7 +105,7 @@ static void run_child(int write_fd, const Graph *graph, int src, int dst) {
     }
 
     /* *** הודעת סיום - finished=1 *** */
-    TravelerMsg done = {-1, -1, 1};
+    TravelerMsg done = {-1, -1, 1, 0};
     write(write_fd, &done, sizeof(done));
     close(write_fd);
     _exit(0);
@@ -114,6 +117,15 @@ static void run_child(int write_fd, const Graph *graph, int src, int dst) {
  * ------------------------------------------------------------------ */
 static void apply_message(Traveler *t, const TravelerMsg *msg,
                            const Graph *graph, Vector2 positions[]) {
+    /* *** טיפול בהודעת "אין מסלול" - נפרד מהודעות רגילות *** */
+    if (msg->no_path) {
+        printf("[PID=%d] NO PATH from node %d to node %d (graph not connected)\n",
+               (int)t->pid, t->src, t->dst);
+        fflush(stdout);
+        t->state = T_FINISHED;
+        return;
+    }
+
     if (msg->finished) {
         printf("[PID=%d] finished\n", (int)t->pid);
         fflush(stdout);
@@ -233,7 +245,7 @@ int main(int argc, char *argv[]) {
             TravelerMsg msg;
             ssize_t n = read(t->read_fd, &msg, sizeof(msg));
             if (n == (ssize_t)sizeof(msg)) {
-                if (t->state == T_MOVING && !msg.finished && msg.next_node != -1) {
+                if (t->state == T_MOVING && !msg.finished && !msg.no_path && msg.next_node != -1) {
                     /* Still animating — buffer the message */
                     t->pending     = msg;
                     t->has_pending = 1;
