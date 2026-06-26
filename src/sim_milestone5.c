@@ -52,6 +52,7 @@ typedef struct {
     pid_t        pid;
     Color        color;
     int          read_fd;
+    int          signal_fd;
 
     TravelerState state;
     int           current_node;
@@ -76,13 +77,16 @@ static int   palette_size = 8;
  *   2. מחכה (usleep) לפי משקל הקשת
  * בסוף שולח הודעת finished ויוצא
  * ------------------------------------------------------------------ */
-static void run_child(int write_fd, const Graph *graph, int src, int dst) {
+static void run_child(int write_fd, int read_fd, const Graph *graph, int src, int dst) {
     int path[MAX_NODES], path_length, total_weight;
 
     if (!dijkstra_path(graph, src, dst, path, &path_length, &total_weight)) {
         TravelerMsg done = {-1, -1, 1};
         write(write_fd, &done, sizeof(done));
+        char ack = 0;
+        read(read_fd, &ack, 1);
         close(write_fd);
+        close(read_fd);
         _exit(0);
     }
 
@@ -93,6 +97,8 @@ static void run_child(int write_fd, const Graph *graph, int src, int dst) {
         msg.next_node    = (i < path_length - 1) ? path[i + 1] : -1;
         /* *** שליחת הודעה לאב דרך ה-pipe *** */
         write(write_fd, &msg, sizeof(msg));
+        char ack = 0;
+        read(read_fd, &ack, 1);
 
         if (i < path_length - 1) {
             int w = graph->matrix[path[i]][path[i + 1]];
@@ -104,7 +110,10 @@ static void run_child(int write_fd, const Graph *graph, int src, int dst) {
     /* *** הודעת סיום - finished=1 *** */
     TravelerMsg done = {-1, -1, 1};
     write(write_fd, &done, sizeof(done));
+    char ack = 0;
+    read(read_fd, &ack, 1);
     close(write_fd);
+    close(read_fd);
     _exit(0);
 }
 
@@ -163,9 +172,10 @@ int main(int argc, char *argv[]) {
      * pipefds[i][0] = read end  (האב קורא מכאן)
      * pipefds[i][1] = write end (הבן כותב לכאן)
      */
-    int pipefds[MAX_TRAVELERS][2];
+    int data_pfds[MAX_TRAVELERS][2];
+    int signal_pfds[MAX_TRAVELERS][2];
     for (int i = 0; i < num_travelers; i++) {
-        if (pipe(pipefds[i]) < 0) {
+        if (pipe(data_pfds[i]) < 0 || pipe(signal_pfds[i]) < 0) {
             perror("pipe");
             return 1;
         }
@@ -189,10 +199,14 @@ int main(int argc, char *argv[]) {
         if (pid == 0) {
             /* Child: close all read ends and all other write ends */
             for (int j = 0; j < num_travelers; j++) {
-                close(pipefds[j][0]);
-                if (j != i) close(pipefds[j][1]);
+                close(data_pfds[j][0]);
+                close(signal_pfds[j][1]);
+                if (j != i) {
+                    close(data_pfds[j][1]);
+                    close(signal_pfds[j][0]);
+                }
             }
-            run_child(pipefds[i][1], &graph, specs[i].src, specs[i].dst);
+            run_child(data_pfds[i][1], signal_pfds[i][0], &graph, specs[i].src, specs[i].dst);
             /* unreachable */
         }
         if (pid < 0) {
@@ -200,10 +214,13 @@ int main(int argc, char *argv[]) {
             return 1;
         }
         t->pid     = pid;
-        t->read_fd = pipefds[i][0];
+        t->read_fd = data_pfds[i][0];
+        t->signal_fd = signal_pfds[i][1];
 
-        /* Parent closes the write end for this child's pipe */
-        close(pipefds[i][1]);
+        /* Parent closes the write end for the child data pipe */
+        close(data_pfds[i][1]);
+        /* Parent closes the read end for the child signal pipe */
+        close(signal_pfds[i][0]);
 
         /* *** non-blocking read - האב לא נחסם אם אין הודעה ***
          * בלי זה, read() היה חוסם את לולאת הציור
@@ -233,6 +250,9 @@ int main(int argc, char *argv[]) {
             TravelerMsg msg;
             ssize_t n = read(t->read_fd, &msg, sizeof(msg));
             if (n == (ssize_t)sizeof(msg)) {
+                char ack = 1;
+                write(t->signal_fd, &ack, 1);
+
                 if (t->state == T_MOVING && !msg.finished && msg.next_node != -1) {
                     /* Still animating — buffer the message */
                     t->pending     = msg;
@@ -293,6 +313,7 @@ int main(int argc, char *argv[]) {
 
     /* Reap all children */
     for (int i = 0; i < num_travelers; i++) {
+        close(travelers[i].signal_fd);
         close(travelers[i].read_fd);
         waitpid(travelers[i].pid, NULL, 0);
     }
